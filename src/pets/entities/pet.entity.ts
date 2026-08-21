@@ -9,8 +9,8 @@ import { User } from 'src/users/entities/user.entity';
 
 @Entity()
 export class Pet {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
+  @PrimaryGeneratedColumn('increment')
+  id!: number;
 
   @Column()
   name!: string;

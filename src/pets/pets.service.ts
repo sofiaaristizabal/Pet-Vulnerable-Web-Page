@@ -19,6 +19,7 @@ export class PetsService {
       imageUrl: imagePath || undefined,
     });
     await this.petRepository.save(pet);
+    return pet;
   }
 
   async searchByName(name: string) {
@@ -26,7 +27,7 @@ export class PetsService {
     return this.petRepository.query(query);
   }
 
-  async findOne(id: string) {
+  async findOne(id: number) {
     const pet = await this.petRepository.findOneBy({ id });
     if (!pet) throw new NotFoundException('Pet not found');
     return pet; // no owner check
@@ -37,13 +38,13 @@ export class PetsService {
   }
 
   // Update and Delete also without ownership checks – but we'll demonstrate via findOne
-  async update(id: string, updateData: any) {
+  async update(id: number, updateData: any) {
     const pet = await this.findOne(id); // reuses broken findOne
     Object.assign(pet, updateData);
     return this.petRepository.save(pet);
   }
 
-  async remove(id: string) {
+  async remove(id: number) {
     const pet = await this.findOne(id);
     return this.petRepository.remove(pet);
   }
